@@ -171,8 +171,16 @@ async def run_pipeline(query: str, progress_callback=None) -> dict:
 
 
 def run_sync(query: str, progress_callback=None) -> dict:
-    """Synchronous wrapper."""
-    return asyncio.run(run_pipeline(query, progress_callback=progress_callback))
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        import nest_asyncio; nest_asyncio.apply()
+        return loop.run_until_complete(run_pipeline(query, progress_callback=progress_callback))
+    else:
+        return asyncio.run(run_pipeline(query, progress_callback=progress_callback))
 
 
 if __name__ == "__main__":
