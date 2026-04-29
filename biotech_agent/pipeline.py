@@ -34,6 +34,34 @@ def _docs_to_dicts(doc_list) -> list:
     return result
 
 
+def _trial_from_doc(d: dict) -> dict:
+    """
+    Extract a structured trial dict from a raw document.
+    Handles both flat dicts and dicts with a nested 'metadata' key,
+    so the trials_structured fallback works regardless of how
+    data_retriever.py structures its output.
+    """
+    meta = d.get("metadata", {})
+
+    def get(key):
+        # Prefer top-level key, fall back to metadata sub-key
+        return d.get(key) or meta.get(key, "N/A")
+
+    return {
+        "nct_id":            get("nct_id"),
+        "title":             d.get("title", ""),
+        "phase":             get("phase"),
+        "status":            get("status"),
+        "enrollment":        get("enrollment"),
+        "sponsor":           get("sponsor"),
+        "interventions":     get("interventions") if get("interventions") != "N/A" else [],
+        "primary_outcomes":  get("primary_outcomes") if get("primary_outcomes") != "N/A" else [],
+        "start_date":        get("start_date"),
+        "completion_date":   get("completion_date"),
+        "conditions":        get("conditions") if get("conditions") != "N/A" else [],
+    }
+
+
 async def run_pipeline(query: str, progress_callback=None) -> dict:
     """
     Full pipeline: query -> retrieve -> agent -> charts -> report.
@@ -125,23 +153,16 @@ async def run_pipeline(query: str, progress_callback=None) -> dict:
     progress("Generating charts (Gantt, heatmap, phase distribution, sponsor chart)...")
     trials_structured = final_state.get("trial_landscape_structured", [])
 
-    # Rebuild from raw if node didn't populate structured list
+    # Rebuild from raw docs if the agent node didn't populate the structured list.
+    # Uses _trial_from_doc which handles both flat and nested-metadata doc shapes.
     if not trials_structured:
+        logger.warning(
+            "trial_landscape_structured was empty after agent run — rebuilding from raw "
+            "clinical_trials docs. Chart field fidelity may be reduced if doc structure "
+            "differs from expected schema."
+        )
         trials_structured = [
-            {
-                "nct_id": d.get("metadata", {}).get("nct_id", ""),
-                "title": d.get("title", ""),
-                "phase": d.get("metadata", {}).get("phase", "N/A"),
-                "status": d.get("metadata", {}).get("status", "N/A"),
-                "enrollment": d.get("metadata", {}).get("enrollment", "N/A"),
-                "sponsor": d.get("metadata", {}).get("sponsor", "N/A"),
-                "interventions": d.get("metadata", {}).get("interventions", []),
-                "primary_outcomes": d.get("metadata", {}).get("primary_outcomes", []),
-                "start_date": d.get("metadata", {}).get("start_date", ""),
-                "completion_date": d.get("metadata", {}).get("completion_date", ""),
-                "conditions": d.get("metadata", {}).get("conditions", []),
-            }
-            for d in initial_state["clinical_trials"]
+            _trial_from_doc(d) for d in initial_state["clinical_trials"]
         ]
 
     charts = generate_all_charts(trials_structured, query, fda_docs=_docs_to_dicts(retrieval_data['fda']))
@@ -171,16 +192,8 @@ async def run_pipeline(query: str, progress_callback=None) -> dict:
 
 
 def run_sync(query: str, progress_callback=None) -> dict:
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        import nest_asyncio; nest_asyncio.apply()
-        return loop.run_until_complete(run_pipeline(query, progress_callback=progress_callback))
-    else:
-        return asyncio.run(run_pipeline(query, progress_callback=progress_callback))
+    """Synchronous wrapper — safe to call from Jupyter or a plain script."""
+    return asyncio.run(run_pipeline(query, progress_callback=progress_callback))
 
 
 if __name__ == "__main__":

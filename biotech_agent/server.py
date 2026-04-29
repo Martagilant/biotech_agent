@@ -1,12 +1,13 @@
 """
 FastAPI server with Server-Sent Events (SSE) streaming progress.
-Single input endpoint: POST /generate-report  {"query": "disease name"}
+Single input endpoint: POST /stream-report  {"query": "disease name"}
 """
 import asyncio
 import json
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -14,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from pipeline import run_pipeline
@@ -34,6 +34,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# In-memory report store — keyed by report_id UUID.
+# Reports are served via GET /report/{report_id} to avoid embedding
+# large HTML payloads (500KB–1MB) in a single SSE data line, which
+# exceeds nginx/browser SSE buffer limits and silently truncates.
+_report_store: dict[str, str] = {}
+
+PIPELINE_TIMEOUT_SECONDS = 600  # 10-minute hard cap
 
 
 class ReportRequest(BaseModel):
@@ -119,8 +127,6 @@ LANDING_HTML = """<!DOCTYPE html>
     transition: all 0.15s;
   }
   .tag:hover { background: #E1F5EE; border-color: #9FE1CB; color: #0F6E56; }
-
-  /* Progress overlay */
   #progress-overlay {
     display: none;
     position: fixed; inset: 0;
@@ -183,7 +189,6 @@ LANDING_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Progress overlay -->
   <div id="progress-overlay">
     <div class="spinner"></div>
     <div id="progress-title">Generating report…</div>
@@ -226,14 +231,12 @@ LANDING_HTML = """<!DOCTYPE html>
           body: JSON.stringify({query})
         });
 
-        if (!response.ok) {
-          throw new Error(`Server error: ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let htmlReport = '';
+        let reportId = null;
 
         while (true) {
           const {done, value} = await reader.read();
@@ -242,25 +245,23 @@ LANDING_HTML = """<!DOCTYPE html>
           const lines = buffer.split('\\n');
           buffer = lines.pop();
           for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6);
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.type === 'progress') {
-                  addLog(parsed.message);
-                } else if (parsed.type === 'complete') {
-                  htmlReport = parsed.html;
-                }
-              } catch(e) {}
-            }
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const parsed = JSON.parse(line.slice(6));
+              if (parsed.type === 'progress') {
+                addLog(parsed.message);
+              } else if (parsed.type === 'complete') {
+                reportId = parsed.report_id;
+              } else if (parsed.type === 'error') {
+                throw new Error(parsed.message);
+              }
+            } catch(e) { /* malformed line, skip */ }
           }
         }
 
-        if (htmlReport) {
-          // Open report in new tab
-          const blob = new Blob([htmlReport], {type: 'text/html'});
-          const url = URL.createObjectURL(blob);
-          window.open(url, '_blank');
+        if (reportId) {
+          // Fetch the report HTML from the store endpoint and open in new tab
+          window.open(`/report/${reportId}`, '_blank');
         }
       } catch(err) {
         addLog('Error: ' + err.message);
@@ -272,7 +273,6 @@ LANDING_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Allow Enter key
     document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('query-input').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') generateReport();
@@ -290,7 +290,12 @@ async def landing():
 
 @app.post("/stream-report")
 async def stream_report(request: ReportRequest):
-    """SSE endpoint: streams progress then delivers full HTML report."""
+    """
+    SSE endpoint: streams progress events, then emits a 'complete' event
+    containing only a report_id. The full HTML is stored server-side and
+    served via GET /report/{report_id} to avoid SSE buffer overflow on
+    large reports (500KB–1MB with embedded base64 chart images).
+    """
     query = request.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
@@ -298,53 +303,58 @@ async def stream_report(request: ReportRequest):
         raise HTTPException(status_code=400, detail="Query too long")
 
     async def event_generator():
-        import json as _json
-        messages = []
+        queue: asyncio.Queue = asyncio.Queue()
 
         def progress_cb(msg: str):
-            messages.append(msg)
+            # Called from within the same event loop (create_task, not thread),
+            # so put_nowait is safe and avoids the run_coroutine_threadsafe pattern.
+            try:
+                queue.put_nowait({"type": "progress", "message": msg})
+            except asyncio.QueueFull:
+                pass
+
+        async def run_with_progress():
+            try:
+                result = await run_pipeline(query, progress_callback=progress_cb)
+                report_id = str(uuid.uuid4())
+                _report_store[report_id] = result["html"]
+                queue.put_nowait({"type": "complete", "report_id": report_id})
+            except Exception as e:
+                logger.exception(f"Pipeline error for query '{query}': {e}")
+                queue.put_nowait({"type": "error", "message": str(e)})
+            finally:
+                queue.put_nowait(None)  # sentinel
+
+        task = asyncio.create_task(run_with_progress())
 
         try:
-            # Run pipeline with progress callback in thread
-            loop = asyncio.get_event_loop()
-
-            # We need to yield SSE events while pipeline runs
-            # Use a queue for cross-task communication
-            queue = asyncio.Queue()
-
-            async def progress_cb_async(msg: str):
-                await queue.put({"type": "progress", "message": msg})
-
-            async def run_with_progress():
-                def sync_cb(msg):
-                    asyncio.run_coroutine_threadsafe(progress_cb_async(msg), loop)
-                result = await run_pipeline(query, progress_callback=sync_cb)
-                await queue.put({"type": "complete", "html": result["html"]})
-                await queue.put(None)  # Sentinel
-
-            task = asyncio.create_task(run_with_progress())
+            # Apply a hard timeout to the entire pipeline run
+            deadline = asyncio.get_event_loop().time() + PIPELINE_TIMEOUT_SECONDS
 
             while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    task.cancel()
+                    yield 'data: {"type": "error", "message": "Pipeline timed out after 10 minutes"}\n\n'
+                    break
+
                 try:
-                    item = await asyncio.wait_for(queue.get(), timeout=300.0)
+                    item = await asyncio.wait_for(queue.get(), timeout=min(30.0, remaining))
                 except asyncio.TimeoutError:
                     yield 'data: {"type": "progress", "message": "Still working..."}\n\n'
                     continue
+
                 if item is None:
                     break
-                if item.get("type") == "complete":
-                    # Stream report in chunks to avoid response size issues
-                    html_content = item["html"]
-                    yield f'data: {_json.dumps({"type": "complete", "html": html_content})}\n\n'
-                else:
-                    yield f'data: {_json.dumps(item)}\n\n'
 
-            await task
+                yield f"data: {json.dumps(item)}\n\n"
 
-        except Exception as e:
-            logger.exception(f"Pipeline error: {e}")
-            yield f'data: {_json.dumps({"type": "progress", "message": f"Error: {str(e)}"})}\n\n'
-            yield f'data: {_json.dumps({"type": "error", "message": str(e)})}\n\n'
+                if item.get("type") in ("complete", "error"):
+                    break
+
+        finally:
+            if not task.done():
+                task.cancel()
 
     return StreamingResponse(
         event_generator(),
@@ -357,25 +367,23 @@ async def stream_report(request: ReportRequest):
     )
 
 
-@app.post("/generate-report")
-async def generate_report_sync(request: ReportRequest):
-    """Non-streaming endpoint: returns full report JSON (may be slow)."""
-    query = request.query.strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-    try:
-        result = await run_pipeline(query)
-        return {
-            "query": query,
-            "html": result["html"],
-            "elapsed_seconds": result["elapsed_seconds"],
-            "stats": result["retrieval_stats"]["stats"],
-        }
-    except Exception as e:
-        logger.exception(f"Report generation error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/report/{report_id}", response_class=HTMLResponse)
+async def get_report(report_id: str):
+    """
+    Serve a generated report by ID. Reports are stored in memory for the
+    lifetime of the server process. In production, swap _report_store for
+    Redis with a TTL (e.g. 24h).
+    """
+    html = _report_store.get(report_id)
+    if not html:
+        raise HTTPException(status_code=404, detail="Report not found or expired")
+    return HTMLResponse(content=html)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "api_key_set": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+    return {
+        "status": "ok",
+        "api_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "reports_in_memory": len(_report_store),
+    }
