@@ -1,11 +1,11 @@
 # 🧬 Invivo Partners — Biotech Research Agent
 
-> Investment-grade biotech research reports, generated in seconds.
+> Investment-grade biotech research reports, generated in minutes.
 
-[![Run Tests](https://github.com/YOUR_USERNAME/invivo-biotech-agent/actions/workflows/test.yml/badge.svg)](https://github.com/YOUR_USERNAME/invivo-biotech-agent/actions)
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/YOUR_USERNAME/invivo-biotech-agent)
+[![Run Tests](https://github.com/Martagilant/biotech_agent/actions/workflows/test.yml/badge.svg)](https://github.com/Martagilant/biotech_agent/actions)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Martagilant/biotech_agent)
 
-Type a disease name. Get a 12-section investor-grade HTML report with 14 charts, real clinical trial data, market sizing, competitive dynamics, and a named investment recommendation — in under 10 seconds.
+Type a disease name. Get a 12-section investor-grade HTML report with 14 charts, real clinical trial data, market sizing, competitive dynamics, and a named investment recommendation — in under 30 seconds from the curated database, or 3–6 minutes with a live API key.
 
 ---
 
@@ -13,8 +13,8 @@ Type a disease name. Get a 12-section investor-grade HTML report with 14 charts,
 
 1. Click **"Open in GitHub Codespaces"** badge above (or: Code → Codespaces → New codespace)
 2. Wait ~60 seconds for the environment to build
-3. Open `biotech_agent_notebook.ipynb`
-4. Run Cell 1 → Cell 2 → Cell 3 with your disease name
+3. Open `biotech_agent_notebook.ipynb` from the repo root
+4. Run Cell 1 → Cell 2 → type your disease name
 
 That's it. No local Python install, no dependency conflicts.
 
@@ -30,8 +30,8 @@ That's it. No local Python install, no dependency conflicts.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/invivo-biotech-agent.git
-cd invivo-biotech-agent
+git clone https://github.com/Martagilant/biotech_agent.git
+cd biotech_agent
 
 # 2. Create a virtual environment (recommended)
 python -m venv .venv
@@ -41,35 +41,36 @@ source .venv/bin/activate        # Mac/Linux
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Launch Jupyter
+# 4. Launch Jupyter from the repo root (important — the notebook must
+#    be run from here so that the biotech_agent/ package is importable)
 jupyter notebook biotech_agent_notebook.ipynb
 ```
 
 Your browser will open the notebook. Run the cells top to bottom.
 
+> **Important:** Always launch Jupyter from the repo root directory (the folder containing `biotech_agent_notebook.ipynb` and the `biotech_agent/` subfolder). Do not move the notebook into the `biotech_agent/` subdirectory — the import paths depend on this layout.
+
 ---
 
 ## 🔑 API Key (optional — but unlocks all diseases)
 
-**Without a key:** Works perfectly for the 13 curated diseases listed below.
+**Without a key:** Works perfectly for the 13 curated diseases listed below, in ~30 seconds.
 
-**With a key:** Works for *any* disease using live data from PubMed, ClinicalTrials.gov, Semantic Scholar, OpenFDA, and bioRxiv.
+**With a key:** Works for *any* disease using live data from PubMed, ClinicalTrials.gov, Semantic Scholar, OpenFDA, and bioRxiv. Typical runtime: 3–6 minutes.
 
 Get a free key at [console.anthropic.com](https://console.anthropic.com) — takes 2 minutes.
 
 ### How to set the key
 
-**Option A — In the notebook** (simplest, don't commit):
-```python
-# Cell 2 in the notebook:
-import os
-os.environ['ANTHROPIC_API_KEY'] = 'sk-ant-your-key-here'
-```
-
-**Option B — Environment variable** (recommended for local use):
+**Option A — Environment variable** (recommended for local use):
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-your-key-here   # Mac/Linux
 set ANTHROPIC_API_KEY=sk-ant-your-key-here       # Windows
+```
+
+**Option B — In Cell 4 of the notebook** (paste and run, but do not commit):
+```python
+key = 'sk-ant-your-key-here'
 ```
 
 **Option C — GitHub Codespaces secret** (most secure, persists across sessions):
@@ -129,23 +130,24 @@ Phase distribution · Stage funnel · Gantt timeline · Enrollment trend · Regu
 ## 🏗️ Project structure
 
 ```
-invivo-biotech-agent/
-├── biotech_agent_notebook.ipynb  ← start here
+biotech_agent/                        ← repo root, run Jupyter from here
+├── biotech_agent_notebook.ipynb      ← start here
 ├── requirements.txt
-├── biotech_agent/
-│   ├── pipeline.py               ← report orchestrator + CLI
-│   ├── server.py                 ← FastAPI web server
+├── biotech_agent/                    ← Python package
+│   ├── __init__.py
+│   ├── pipeline.py                   ← report orchestrator + CLI
+│   ├── server.py                     ← FastAPI web server
 │   ├── retrievers/
-│   │   ├── data_retriever.py     ← PubMed, ClinicalTrials.gov, Semantic Scholar...
-│   │   └── mock_data.py          ← 13-disease curated database (119 real trials)
+│   │   ├── data_retriever.py         ← PubMed, ClinicalTrials.gov, Semantic Scholar...
+│   │   └── mock_data.py              ← 13-disease curated database (119 real trials)
 │   ├── agents/
-│   │   └── research_agent.py     ← LangGraph 8-node DAG
+│   │   └── research_agent.py         ← LangGraph 6-node DAG
 │   └── reports/
-│       ├── infographics.py       ← 14 Matplotlib charts
-│       └── report_generator.py   ← HTML report template
-├── outputs/                      ← generated reports saved here
-├── .devcontainer/                ← GitHub Codespaces config
-└── .github/workflows/            ← CI tests
+│       ├── infographics.py           ← 14 Matplotlib charts
+│       └── report_generator.py       ← HTML report template
+├── outputs/                          ← generated reports saved here
+├── .devcontainer/                    ← GitHub Codespaces config
+└── .github/workflows/                ← CI tests
 ```
 
 ---
@@ -159,7 +161,7 @@ cd biotech_agent
 python -m uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-Open http://localhost:8000 — type any disease and watch the report stream in real time.
+Open http://localhost:8000 — type any disease and watch progress stream in real time. The completed report opens in a new tab.
 
 ---
 
